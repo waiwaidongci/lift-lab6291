@@ -1,3 +1,4 @@
 export const Roles={admin:'实验负责人',analyst:'数据分析师',viewer:'业务观察员'} as const;
 export const RunStatus={queued:'排队中',running:'分析中',completed:'已完成',failed:'失败'} as const;
 export const Outcomes={ship:'同意放量',hold:'继续观察',reject:'暂缓上线'} as const;
+export const ImportStatus={published:'已发布新版本',duplicate:'内容相同 · 未新增版本',rejected:'整批拒绝'} as const;

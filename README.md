@@ -31,18 +31,33 @@ docker compose exec -T backend python -m scripts.seed_demo
 | analyst@lanqiao.demo | Lanqiao2026! | analyst |
 | viewer@lanqiao.demo | Lanqiao2026! | viewer |
 
-首次启动自动 seed（`SEED_DEMO=true`），失败记日志而不阻断服务。再次执行根据用户邮箱、数据集名称、实验名查重，不覆盖已经存在的行。数据库通过 ORM metadata 首次建表；`backend/migrations/001_initial.sql` 提供索引迁移示例，后续结构修改需审查迁移，启动不会自动升级已存在表。
+首次启动自动 seed（`SEED_DEMO=true`），失败记日志而不阻断服务。再次执行根据用户邮箱、数据集名称、实验名查重，不覆盖已经存在的行。数据库通过 ORM metadata 首次建表；`backend/migrations/` 提供索引与版本迁移脚本。启动只执行只增不删的兼容升级（补列、把旧观测归入 v1），其余结构修改仍需审查迁移。
 
 ## 一天的研究剧本
 
 1. 09:00 林序以 admin 登录，检查 `lanqiao-paywall-2026-11.csv` 的 2400 条观测和校验和。
-2. 09:10 许禾以 analyst 登录，在实验配置登记“短文付费入口 v4”。
-3. 选择已冻结的付费入口数据，写明可检验的业务假设。
-4. 固定收入指标、α=.05，打开 CUPED 校正，提交分析。
-5. 后台 worker 从 Redis 队列取任务，使用 Python 计算 Welch 与 CUPED 结果。
-6. 09:15 在分析结果检查 1200/1200 样本量、p 值、区间和方差降低，并导出 CSV。
-7. 周澄以 viewer 阅读同一证据；登记接口和归档接口均会拒绝该角色。
-8. 10:00 林序记录“同意放量/继续观察/暂缓上线”及至少 8 字依据，在操作留痕追溯动作。
+2. 09:05 林序在观测数据页上传新导出的 CSV，页面校验后发布 v2；若与已发布内容一致（即使行序不同）只记录一次重复导入，不新增版本。
+3. 09:10 许禾以 analyst 登录，在实验配置登记“短文付费入口 v4”，并选定观测版本 v2。
+4. 选择已冻结的付费入口数据，写明可检验的业务假设。
+5. 固定收入指标、α=.05，打开 CUPED 校正，提交分析。
+6. 后台 worker 从 Redis 队列取任务，使用 Python 计算 Welch 与 CUPED 结果；任务固定读取登记时的观测版本，v1 上的旧实验仍用原观测复算。
+7. 09:15 在分析结果检查 1200/1200 样本量、p 值、区间和方差降低，并导出 CSV。
+8. 周澄以 viewer 阅读同一证据；登记接口和归档接口均会拒绝该角色。
+9. 10:00 林序记录“同意放量/继续观察/暂缓上线”及至少 8 字依据，在操作留痕追溯动作。
+
+## 观测导入与数据集版本
+
+观测数据页支持从浏览器直接导入 CSV，不再依赖 seed。每次成功导入会发布一个不可变的 `DatasetVersion`，观测行按版本隔离保存。
+
+- **列**：`subject, arm, pre_value, value`，也接受 `user/group/pre/revenue` 与中文表头；分组接受 `control/treatment/对照组/候选组`。UTF-8（含 BOM）优先，无法解码时回退 GB18030。
+- **去重**：同一匿名样本在同一批次内内容完全相同（分组、前置、后置数值一致）只保留一行，首行行号用于追溯；版本记录保留 `rows_received / rows_unique / duplicates_removed`。
+- **冲突**：同一样本重复出现但分组或数值不同，整批拒绝，不写入任何观测；接口返回 `422` 和逐行错误（文件行号、样本、原因），导入记录同样可查。
+- **幂等**：内容校验和按样本排序后计算，因此换行序重传识别为同一内容，返回 `200 + status=duplicate`，不新增版本；`409` 仅保留给并发发布冲突。
+- **版本固定**：实验登记时必须选定版本（默认最新）；`analysis_runs` 记录入队时固定的版本，worker 只读该版本，新上传不会改变旧实验的复算依据。观测页展示每个版本被哪些实验登记使用。
+- **权限**：admin / analyst 可导入与建数据集，viewer 只读。
+- **接口**：`POST /datasets/{id}/import`（multipart：`file`、可选 `description`）、`GET /datasets/{id}/versions`、`GET /datasets/{id}/imports`、`GET /datasets/{id}/usage`、`GET /datasets/{id}/observations?version=N`。
+
+已有数据库启动时会做增量升级：新增版本/导入表与版本列，把旧观测归入 v1，并替换旧的 `(dataset_id, subject)` 唯一约束（见 `backend/migrations/002_dataset_versions.sql`）。
 
 ## 计算口径
 
@@ -53,7 +68,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 ## 功能与工程结构
 
-六页：实验概览、观测数据（前100条预览）、实验配置、分析结果（真实 SVG 区间图）、决策档案、操作留痕。实体 Dataset / Observation / Experiment / AnalysisRun / Decision 各有数据模型与 API；API、前端 store、组件职责分开。
+六页：实验概览、观测数据（版本历史、导入记录、前100条预览）、实验配置（选择观测版本）、分析结果（真实 SVG 区间图，标注复算版本）、决策档案、操作留痕。实体 Dataset / DatasetVersion / DatasetImport / Observation / Experiment / AnalysisRun / Decision 各有数据模型与 API；API、前端 store、组件职责分开。
 
 | 层 | 技术 |
 |---|---|
@@ -66,7 +81,8 @@ docker compose exec -T backend python -m scripts.seed_demo
 backend/src/{models,schemas,services,controllers,routes,middlewares,utils,constants,config}
 backend/src/{main.py,worker.py}
 backend/scripts/seed_demo.py
-backend/migrations/001_initial.sql
+backend/tests/
+backend/migrations/{001_initial,002_dataset_versions}.sql
 frontend/src/{api,stores,types,components,hooks,pages,router,utils,constants}
 ```
 
@@ -93,9 +109,11 @@ docker compose down -v --remove-orphans
 
 ## 本地开发与验证
 
-安装 Python 3.11，`pip install -r backend/requirements.txt`；将 `DATABASE_URL` / `REDIS_URL` 指向本机依赖，`cd backend && uvicorn src.main:app --reload`。前端 `cd frontend && npm install && npm run dev`；开发时需为 `/api` 配置反向代理到本地后端。标准启动以 Compose 为准。
+安装 Python 3.11，`pip install -r backend/requirements.txt`（含 `python-multipart` 以支持页面上传）；将 `DATABASE_URL` / `REDIS_URL` 指向本机依赖，`cd backend && uvicorn src.main:app --reload`。前端 `cd frontend && npm install && npm run dev`；开发时需为 `/api` 配置反向代理到本地后端。标准启动以 Compose 为准。
 
-测试脚本、截图和真实结果在项目外 `../../test-artifacts/gb-0001/`。日志与 `.env` 不提交。该应用适合本地合成数据研究；不包含真实文件上传、邮件外发、生产级多实例限流或任务恢复。
+后端测试（内存 SQLite，不依赖 Postgres/Redis）：`cd backend && python -m pytest tests -q`。覆盖解析去重与冲突行号、换序重传幂等、版本发布、实验固定版本与旧实验复算、multipart 接口与权限。
+
+测试脚本、截图和真实结果在项目外 `../../test-artifacts/gb-0001/`。日志与 `.env` 不提交。该应用适合本地合成数据研究；不包含邮件外发、生产级多实例限流或任务恢复。CSV 导入限制为 20MB 并逐行校验。
 
 ## License
 
